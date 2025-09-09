@@ -1,0 +1,2275 @@
+---
+title: "Karim's TFM"
+author: "Karim Yassine / Aleix Noguera / Manel Esteller"
+date: "2025-04-01"
+output: html_document
+---
+# Loading libraries:
+
+```{r loading the libraries, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+library(arsenal)
+library(Coxmos)
+library(coxphf)
+library(circlize)
+library(ComplexHeatmap)
+library(caret)
+library(DMRcate)
+library(dplyr)
+library(annotate)
+library(extrafont)
+library(FactoMineR)
+library(factoextra)
+library(GEOquery)
+library(GenomicFeatures)
+library(GO.db)
+library(GOstats)
+library(glmnet)
+library(ggfortify)
+library(ggplot2)
+library(ggstatsplot)
+library(gplots)
+library(Hmisc)
+library(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+library(IlluminaHumanMethylationEPICmanifest)
+library(knitr)
+library(limma)
+#library(maxprobes)
+library(minfi)
+library(minfiData)
+library(missMethyl)
+library(methylGSA)
+library(org.Hs.eg.db)
+library(PCAtools)
+library(pheatmap)
+library(plotly)
+library(RegParallel)
+library(readxl)
+library(rempsyc)
+library(rgl)
+library(Rtsne)
+library(stringr)
+library(survival)
+library(survivalROC)
+library(survminer)
+library(timeROC)
+library(tidyr)
+library(tidyverse)
+library(writexl)
+gc()
+```
+
+# Cleaning and loading the data 
+
+
+```{r cleaning the data, message=FALSE, warning=FALSE}
+set.seed(2000)
+###set the path
+setwd("~/Desktop/TFM Files/")
+
+###loading our excel files and fixing the date issue
+clin_data<- read_excel("SAMPLE_SHEET/AGATA_SAMPLE_SHEET_CLINICAL_DATA.xlsx", col_names=TRUE, col_types = c("text", "text", "text", "text", "text","text", "text", "text", "text", "text","text", "text", "text", "text", "text","text", "text", "text", "text", "text","text", "text", "text", "date", "date", "date", "text", "text", "text", "text", "text", "text", "text")) ####containing metadata and disease status
+
+gen_data<-  read_excel("SAMPLE_SHEET/AGATA_SAMPLE_SHEET_GENOMICS.xlsx", col_names=TRUE) 
+id_equiv<-  read_excel("SAMPLE_SHEET/AGATA_ID_EQUIVALENCE.xls", col_names=TRUE)
+final_data<-  read_excel("SAMPLE_SHEET/AGATA_SAMPLE_SHEET_ALEIX_MASTER.xlsx", col_names=TRUE) 
+
+
+####FILTERING
+
+IDATS<- list.files("~/Desktop/TFM Files/IDATs/")
+IDATS<- as.vector(IDATS)
+cleaned_IDATS<- gsub("_Grn.idat", "", IDATS)
+cleaned_IDATS<- gsub("_Red.idat", "", cleaned_IDATS)
+cleaned_IDATS<- unique(cleaned_IDATS) #144 entries so it is correct
+cleaned_IDATS<- as.vector(cleaned_IDATS)
+head(cleaned_IDATS)
+cleaned_IDATS<- gsub("-", "_", cleaned_IDATS)
+cleaned_IDATS<- toupper(cleaned_IDATS)
+
+
+###gen_data filtering:
+gen_data_filtered <- gen_data %>%
+  filter(gen_data$barcode %in% cleaned_IDATS)
+
+###id equiv filtering: 
+id_equiv$EPIC_Barcode <- gsub("-", "_", id_equiv$EPIC_Barcode)        
+id_equiv$EPIC_Barcode <- toupper(id_equiv$EPIC_Barcode)   
+id_equiv$EPIC_Barcode <- gsub("\\s+", "", id_equiv$EPIC_Barcode)      
+
+gen_data_filtered$barcode<- gsub("-", "_", gen_data_filtered$barcode)        
+gen_data_filtered$barcode <- toupper(gen_data_filtered$barcode)
+gen_data_filtered$barcode <- gsub("\\s+", "", gen_data_filtered$barcode)   
+
+id_equiv_filtered <- id_equiv %>%
+  filter(id_equiv$Sample_ID %in% gen_data_filtered$Sample_ID)
+
+###metadata filtering:
+
+clin_data$Sample_ID <- gsub("-", "_", clin_data$Sample_ID)  
+clin_data$Sample_ID <- gsub("\\s+", "", clin_data$Sample_ID) 
+clin_data$Sample_ID <- gsub("[^0-9_]", "", clin_data$Sample_ID)
+
+id_equiv_filtered$`Pat ID` <- gsub("-", "_",id_equiv_filtered$`Pat ID`)  
+id_equiv_filtered$`Pat ID` <- gsub("\\s+", "", id_equiv_filtered$`Pat ID`) 
+id_equiv_filtered$`Pat ID` <- gsub("[^0-9_]", "", id_equiv_filtered$`Pat ID`) 
+id_equiv_filtered$Sentrix_Position <- sub(".*_", "", id_equiv_filtered$EPIC_Barcode)
+
+###check the result
+head(id_equiv_filtered$Sentrix_Position)
+clin_data_filtered <- clin_data %>%
+  filter(clin_data$Sample_ID %in% id_equiv_filtered$`Pat ID`)
+
+###set the path
+path.idats<-"~/Desktop/TFM Files/IDATs"
+
+###creating sample sheet: 
+barcodes<- id_equiv_filtered %>%
+  filter(id_equiv_filtered$`Pat ID` %in% clin_data_filtered$Sample_ID)
+
+barcodes$barcode <- gsub("^.*IDATs", "~/Desktop/TFM Files/IDATs", barcodes$Basename)
+
+###merging
+sample_sheet <- left_join(clin_data_filtered, barcodes[, c("Pat ID", "barcode")], by = c("Sample_ID" = "Pat ID"))
+sample_sheet_duplicates<- duplicated(sample_sheet$ID) #we have some duplicates
+sample_sheet <- distinct(sample_sheet, ID, .keep_all = TRUE) #beware patients 102_47 and 48
+sample_sheet<- sample_sheet %>% rename(SampleName=Sample_ID)
+sample_sheet<- subset(sample_sheet, Primary_or_Metastasis=="Primary_Tumor")
+
+###extract as csv:
+write.csv(sample_sheet, "targets_prim.csv", row.names = FALSE,sep = ",")     
+
+###reading the sheet
+targets<- read.metharray.sheet(base=getwd(), verbose=TRUE, pattern = "prim.csv")  
+rgset_targets<- targets
+rgset_targets$Basename<- rgset_targets$barcode
+rgset_targets$Sentrix_Position <- id_equiv_filtered$Sentrix_Position[match(rgset_targets$SampleName, id_equiv_filtered$'Pat ID')]
+
+###adding institution
+rgset_targets <- merge(rgset_targets, barcodes[, c("barcode", "Institution")], 
+                       by.x = "barcode", by.y = "barcode", 
+                       all.x = TRUE)
+
+###removing those with missing OS data:
+colnames(rgset_targets)
+rgset_targets <- rgset_targets[!(is.na(rgset_targets$OS_month) & is.na(rgset_targets$OS_year)), ]
+
+###loading annotation file
+ann850k <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b4.hg19)
+head(ann850k)
+
+###loading our rgset (says there is a problem with having data from different arrays but proceed with force)
+rgSet <- read.metharray.exp(targets=rgset_targets, verbose=T, force=T, recursive = T)
+rgSet
+```
+# getQC Plots
+
+```{r, QC}
+###Check how many samples just to make sure everything loaded correctly
+dim(rgSet) #71 samples and 1051539 probes
+
+###load phenodata of the rgset
+phenoData<- pData(rgSet)
+
+###give the samples descriptive names
+rgset_targets$id <- paste(rgset_targets$SampleName,rgset_targets$M_Clasification,sep=".")
+sampleNames(rgSet) <- rgset_targets$id 
+rgSet
+
+###Extract processed methylation data
+MSet<- preprocessRaw(rgSet)
+dim(MSet)
+
+###getqc and plot the MSet
+qc<- getQC(MSet)
+densityPlot(MSet, sampGroups = rgset_targets$Molecular_Subtype)
+
+###detp plots
+detP <- detectionP(rgSet)
+rgset_targets$Molecular_Subtype[is.na(rgset_targets$Molecular_Subtype)] <- "NA" #handling NAs
+#examine mean detection p-values across all samples to identify any failed samples
+detP_barplot <- graphics::barplot(
+  colMeans(detP),
+  las = 2,
+  cex.names = 0.5,
+  main = "Mean detection pval",
+  names.arg = colnames(detP))
+abline(h=0.05,col="red")
+
+
+###pval dataframe
+means_detP<- data.frame(Status=rgset_targets$Molecular_Subtype, 'P-val'= colMeans(detP))
+print(means_detP)
+
+
+```
+# QC Report Generation
+
+```{r qc report}
+qcReport(rgSet, sampNames=rgset_targets$id, sampGroups=rgset_targets$Molecular_Subtype, 
+         pdf="qcReport.pdf")
+```
+
+# Filtering Bad Samples
+
+```{r remove samples}
+###remove poor quality samples
+keep <- colMeans(detP) < 0.05
+rgSet <- rgSet[,keep]
+rgSet
+
+dim(rgSet)
+
+###remove poor quality samples from targets data
+rgset_targets <- rgset_targets[keep,]
+dim(rgset_targets) ###67 remaining
+
+###remove poor quality samples from detection p-value table
+detP <- detP[,keep]
+dim(detP)
+```
+
+# Descriptive Statistics
+
+```{r descriptive statistics}
+rgset_targets_df <- as.data.frame(rgset_targets)
+
+vars <- c(
+  "Age",
+  "Primary_or_Metastasis",
+  "Current_status_ECOG",
+  "Clinical_Subtype",
+  "Molecular_Subtype",
+  "Tumor_Size",
+  "Lymph_Stage",
+  "M_Clasification"
+)
+
+df <- rgset_targets_df[, vars]
+
+total_N <- sum(!is.na(df$Age))
+
+###Age with Mean ± SD
+age_summary <- df %>%
+  summarise(
+    Variable = "Age",
+    Statistic = paste0(
+      "Mean ± SD: ", 
+      round(mean(Age, na.rm = TRUE), 1), " ± ", 
+      round(sd(Age, na.rm = TRUE), 1)
+    )
+  )
+
+
+###Categorical summaries
+cat_summary <- lapply(vars[vars != "Age"], function(var) {
+  tab <- table(df[[var]])
+  tab <- sort(tab, decreasing = TRUE)
+  perc <- prop.table(tab) * 100
+  paste_vals <- paste0(names(tab), ": ", round(perc, 1), "% (", tab, ")")
+  data.frame(
+    Variable = var,
+    Statistic = paste(paste_vals, collapse = "; "),
+    stringsAsFactors = FALSE
+  )
+}) %>% bind_rows()
+
+###Add ECOG meaning
+cat_summary$Variable <- ifelse(
+  cat_summary$Variable == "Current_status_ECOG",
+  "Current_status_ECOG (0 = Fully active, 1 = Restricted activity)",
+  cat_summary$Variable
+)
+
+###Total participants 
+total_row <- data.frame(
+  Variable = "Total number of participants",
+  Statistic = paste0("N = ", total_N),
+  stringsAsFactors = FALSE
+)
+
+###finaltable
+summary_table <- bind_rows(total_row, age_summary, cat_summary)
+
+legend_row <- data.frame(
+  Variable = "Legend",
+  Statistic = "ECOG: 0 = Fully active, 1 = Restricted activity",
+  stringsAsFactors = FALSE
+)
+summary_table <- bind_rows(summary_table, legend_row)
+
+nicetable<- nice_table(summary_table)
+print(nicetable)
+```
+
+# Normalization 
+
+```{r Normalization}
+#gRatioset.illumina<- preprocessNoob(rgSet)
+#gRatioset.illumina<- preprocessQuantile(rgSet)
+#gRatioset.illumina<- preprocessIllumina(rgSet)
+#gRatioset.illumina<- preprocessFunnorm(rgSet)
+###extract p values
+p_values <- detectionP(rgSet, type = "m+u")
+
+###run normalization
+gRatioset.illumina<- preprocessSWAN(rgSet)
+
+
+###remove bad probes:
+keep <- rowSums(p_values<0.01)==ncol(gRatioset.illumina)
+gRatioset.illumina <- gRatioset.illumina[keep,]
+
+###beta values
+betas<- getBeta(gRatioset.illumina)
+
+###mvalues
+Mval<- getM(gRatioset.illumina)
+
+###Plotting
+beta_plot<-densityPlot(betas, xlab='postnorm: beta values', rgset_targets$Molecular_Subtype)
+rgset_plot<- densityPlot(getBeta(rgSet), xlab='prenorm: beta values', rgset_targets$Molecular_Subtype)
+
+```
+# Filtering Bad Probes
+
+```{r Filtering}
+gc()
+#ensure probes are in the same order in the mSetSq and detP objects
+detP <- detP[match(featureNames(gRatioset.illumina),rownames(detP)),] 
+
+#remove any probes that have failed in one or more samples
+keep <- rowSums(detP < 0.01) >=0.9*ncol(gRatioset.illumina) 
+table(keep)
+
+mSetSqFlt <- gRatioset.illumina[keep,]
+mSetSqFlt
+
+###dim
+```
+# Further Probe Filtering
+
+```{r filtering out snps}
+set.seed(2000)
+gc()
+
+###annotate
+mSetSqFlt <- mapToGenome(mSetSqFlt)
+ann850k <- as.data.frame(ann850k)
+
+###removing snps
+mSetSqFlt <- dropLociWithSnps(mSetSqFlt)###removing ones associated with snps as they alter the data and the true biological meaning behind them
+xReactiveProbes <- read.csv("13059_2016_1066_MOESM1_ESM.csv",
+                                       sep=",", stringsAsFactors=FALSE)
+keep <- !(featureNames(mSetSqFlt) %in% xReactiveProbes$TargetID)
+table(keep)
+
+mSetSqFlt <- mSetSqFlt[keep,] 
+mSetSqFlt
+dim(mSetSqFlt)
+
+###beta values 
+betas<- getBeta(mSetSqFlt)
+detP_betas <- detP[match(rownames(betas),rownames(detP)),]
+failed_cpgs<- NULL
+failed_cpgs <- which(detP_betas > 0.01, arr.ind = TRUE)
+betas[failed_cpgs] <- NA
+betas<-t(apply(betas,1,function(x) replace(x, is.na(x), median(x,na.rm=TRUE))))
+
+###mval values 
+Mval<- getM(mSetSqFlt)
+detP_mval <- detP[match(rownames(Mval),rownames(detP)),]
+failed_cpgs_mval<- NULL
+failed_cpgs_mval <- which(detP_mval > 0.01, arr.ind = TRUE)
+Mval[failed_cpgs_mval] <- NA
+Mval<-t(apply(Mval,1,function(x) replace(x, is.na(x), median(x,na.rm=TRUE))))
+
+betas<- rmSNPandCH(betas, dist=2, mafcut = 0.05, rmcrosshyb = T, rmXY = F) ### (they are only females anyway)
+Mval<- rmSNPandCH(Mval, dist=2, mafcut = 0.05, rmcrosshyb = T, rmXY = F) ### (they are only females anyway)
+
+dim(betas)
+dim(Mval)
+# 561598 probes and 67 samples
+
+###PCA
+res.pca <- PCA(t(betas), graph = FALSE)
+
+res.pca.mval <- PCA(t(Mval), graph = FALSE)
+
+###scree plot:
+
+eigenvaluesb <- res.pca.mval$eig
+head(eigenvaluesb[, 1:2])
+
+eigenvaluesm <- res.pca.mval$eig
+head(eigenvaluesm[, 1:2])
+
+graphics::barplot(res.pca$eig[1:8, 2],
+        names.arg = 1:8,
+        main = "Percentage of Variance by PC - Beta Values",
+        xlab = "Principal Components",
+        ylab = "Percentage of Variance",
+        col = "steelblue")
+lines(x = 1:nrow(eigenvaluesb), eigenvaluesb[, 2], 
+      type="b", pch=19, col = "red")
+
+graphics::barplot(res.pca.mval$eig[1:8, 2],
+        names.arg = 1:8,
+        main = "Percentage of Variance by PC - M-Values",
+        xlab = "Principal Components",
+        ylab = "Percentage of Variance",
+        col = "steelblue")
+lines(x = 1:nrow(eigenvaluesm), eigenvaluesm[, 2], 
+      type="b", pch=19, col = "red")
+
+
+###plot function with plotly (bigger points)
+plot_pca_scatter <- function(pca_coords, metadata_factor, factor_name, palette_name="Set2") {
+  
+  ###PCA coords###
+  components <- as.data.frame(pca_coords[, 1:2])
+  colnames(components) <- c("PC1", "PC2")
+  
+  ###add factor###
+  components$Group <- as.factor(metadata_factor)
+  
+  ###Flip PC2 to match fviz_pca_ind style###
+  components$PC2 <- -components$PC2
+  
+  ###distinct palette from Set2###
+  n_levels <- length(levels(components$Group))
+  colors <- brewer.pal(n = max(3, n_levels), name = palette_name)
+  
+  ###Plot###
+  fig <- plot_ly(
+    components,
+    x = ~PC1,
+    y = ~PC2,
+    color = ~Group,
+    colors = colors,
+    type = 'scatter',
+    mode = 'markers',
+    marker = list(
+      size = 16,
+      symbol = 'circle',
+      opacity = 2,
+      line = list(color = "black", width = 1.5)   ###here is where we addded the black border
+    )
+  ) %>%
+    layout(
+      legend = list(title = list(text = factor_name)),
+      plot_bgcolor = 'white',
+      xaxis = list(
+  title = "PC1",
+  zerolinecolor = "black",
+  zerolinewidth = 1,
+  gridcolor = "lightgray"
+),
+yaxis = list(
+  title = "PC2",
+  zerolinecolor = "black",
+  zerolinewidth = 1,
+  gridcolor = "lightgray"
+)
+    )
+  
+  return(fig)
+}
+
+
+###for Molecular Subtype
+fig_molecular <- plot_pca_scatter(res.pca$ind$coord, rgset_targets$Molecular_Subtype, "Molecular Subtype")
+fig_molecular
+
+
+###for Clinical Subtype
+fig_clinical <- plot_pca_scatter(res.pca$ind$coord, rgset_targets$Clinical_Subtype, "Clinical Subtype")
+fig_clinical
+
+
+###for Institution
+fig_institution <- plot_pca_scatter(res.pca$ind$coord, rgset_targets$Institution, "Institution")
+fig_institution
+
+###for sentrix
+fig_sentrix<- plot_pca_scatter(res.pca$ind$coord, rgset_targets$Sentrix_Position, "Sentrix Position")
+fig_sentrix
+
+
+###rtsne 
+rtsne <- Rtsne(t(betas), dims=2, perplexity = 20, verbose = T, max_iter = 2000)
+rtsnem <- Rtsne(t(Mval), dims=2, perplexity = 20, verbose = T, max_iter = 2000)
+
+tsne_df<- data.frame(X=rtsne$Y[,1],
+                     Y=rtsne$Y[,2])
+
+tsne_df_mval<- data.frame(X=rtsnem$Y[,1],
+                     Y=rtsnem$Y[,2])
+
+###number of levels for each factor
+n_levels_mol <- length(levels(factor(rgset_targets$Molecular_Subtype)))
+n_levels_clin <- length(levels(factor(rgset_targets$Clinical_Subtype)))
+n_levels_inst <- length(levels(factor(rgset_targets$Institution)))
+
+###Set2 colors
+colors_mol <- brewer.pal(min(max(n_levels_mol,3),12), "Set2")
+colors_clin <- brewer.pal(min(max(n_levels_clin,3),12), "Set2")
+colors_inst <- brewer.pal(min(max(n_levels_inst,3),12), "Set2")
+
+ggplot(tsne_df, aes(x = X, y = Y, fill = factor(rgset_targets$Molecular_Subtype))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4) +
+  scale_fill_manual(values = colors_mol) +
+  labs(title = "t-SNE Beta-Values: Molecular Subtype", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() + theme(plot.title = element_text(size = 20))
+
+ggplot(tsne_df, aes(x = X, y = Y, fill = factor(rgset_targets$Clinical_Subtype))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4) +
+  scale_fill_manual(values = colors_clin) +
+  labs(title = "t-SNE Beta-Values: Clinical Subtype", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() + theme(plot.title = element_text(size = 20))
+
+ggplot(tsne_df, aes(x = X, y = Y, fill = factor(rgset_targets$Institution))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4) +
+  scale_fill_manual(values = c("#4DB6AC", "#5C6BC0")) +
+  labs(title = "t-SNE Beta-Values: Institution", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 20))
+ggplot(tsne_df, aes(x = X, y = Y, fill = factor(rgset_targets$Sentrix_Position))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4) +
+  labs(title = "t-SNE Beta-Values: Sentrix Position", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 20))
+
+###comptue the median
+median_betas <- apply(betas, 2, median, na.rm = TRUE)
+
+subtypes <- rgset_targets$Molecular_Subtype
+
+###create the data frames
+plot_data <- data.frame(
+  median_betas = median_betas,
+  subtypes = subtypes
+)
+
+###remove NAs
+plot_data$subtypes[plot_data$subtypes == "NA"] <- NA
+plot_data <- plot_data %>% drop_na()
+
+###Plot ggbetweenstats
+plt <- ggbetweenstats(
+  data = plot_data,
+  x = subtypes,
+  y = median_betas,
+  type = "np",                 
+  pairwise.comparisons = FALSE,
+  ggtheme = theme_minimal(),
+  palette = "Set2",             
+  xlab = "Subtype",
+  ylab = "Median Methylation (Beta)"
+)
+
+###theme
+plt <- plt + 
+  labs(
+    x = "Molecular Subtype",
+    y = "Median Methylation (Beta)",
+    title = "Distribution of Median Methylation Across Subtypes"
+  ) + 
+  theme(
+    text = element_text(family = "sans", size = 10, color = "black"),
+    plot.title = element_text(
+      family = "sans", 
+      size = 20,
+      face = "bold",
+      color = "#2a475e"
+    ),
+    plot.subtitle = element_text(
+      family = "sans", 
+      size = 14, 
+      face = "bold",
+      color="#1b2838"
+    ),
+    plot.title.position = "plot",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12)
+  )
+
+###Background
+plt <- plt  +
+  theme(
+    axis.ticks = element_blank(),
+    axis.line = element_line(colour = "grey50"),
+    panel.grid = element_line(color = "#b4aea9"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linetype = "dashed"),
+    panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+    plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4")
+  )
+
+plt
+
+
+```
+
+# Semi-Unsupervised Analysis
+
+```{r semisupervised analysis, warning=FALSE}
+set.seed(2000)
+gc()
+###with betas 
+dim(betas)
+probe_var_betas <- apply(betas, 1, var, na.rm = TRUE)
+
+###filtering top 1%
+len_top_probes_betas <- ceiling(0.01 * nrow(betas))
+top_probes_betas <- names(sort(probe_var_betas, decreasing = TRUE)[1:len_top_probes_betas])
+top_betas <- betas[top_probes_betas, ]
+dim(top_betas)
+
+all_cpgs_betas <- merge(top_betas, ann850k[, c("UCSC_RefGene_Name", "Relation_to_Island", "UCSC_RefGene_Group")], by="row.names")
+rownames(all_cpgs_betas) <- all_cpgs_betas$Row.names
+all_cpgs_betas$Row.names <- NULL
+all_cpgs_betas <- as.data.frame(all_cpgs_betas)
+
+###subsetting CpGs
+df_island_betas <- all_cpgs_betas[all_cpgs_betas$Relation_to_Island == "Island", ]
+df_shore_shelf_betas <- all_cpgs_betas[all_cpgs_betas$Relation_to_Island %in% c("N_Shore","S_Shore","N_Shelf","S_Shelf"), ]
+df_opensea_betas <- all_cpgs_betas[all_cpgs_betas$Relation_to_Island == "OpenSea", ]
+df_island_shore_shelf_betas <- all_cpgs_betas[all_cpgs_betas$Relation_to_Island %in% c("Island","N_Shore","S_Shore","N_Shelf","S_Shelf"), ]
+
+###ALL CpGs HEATMAP
+all_cpgs_betas_annot <- all_cpgs_betas  
+all_cpgs_betas <- all_cpgs_betas[, sapply(all_cpgs_betas, is.numeric)]
+all_cpgs_betas <- as.matrix(all_cpgs_betas)
+
+heat_all <- all_cpgs_betas ###DO NO SCALE
+myCol <- colorRampPalette(c('#39FF12', '#0A0A08', '#F70D1A'))(100)
+  myBreaks <- seq(-0, 1, length.out = 100)
+
+ann_all <- data.frame(
+  Clin = rgset_targets$Clinical_Subtype,
+  Mol = rgset_targets$Molecular_Subtype,
+  Inst = rgset_targets$Institution,
+  stringsAsFactors = FALSE
+)
+
+colours_all <- list(
+  Clin = brewer.pal(4, "Set1")[1:4],
+  Mol = brewer.pal(6, "Set1")[1:6],
+  Inst = brewer.pal(3, "Set1")[1:2]
+)
+names(colours_all$Clin) <- unique(ann_all$Clin)
+names(colours_all$Mol) <- unique(ann_all$Mol)
+names(colours_all$Inst) <- unique(ann_all$Inst)
+
+colAnn_all <- HeatmapAnnotation(
+  df = ann_all,
+  which = 'col', 
+  na_col = 'white', 
+  col = colours_all,
+  annotation_height = 0.2,
+  annotation_width = unit(0.3, 'cm')
+)
+
+###Row annotation
+row_ann_all <- data.frame(
+  Relation = all_cpgs_betas_annot[rownames(heat_all), "Relation_to_Island"],
+  stringsAsFactors = FALSE
+)
+rownames(row_ann_all) <- rownames(heat_all)
+
+relation_colors <- setNames(brewer.pal(6, "Set1"), unique(row_ann_all$Relation))
+
+rowAnn_all <- HeatmapAnnotation(
+  df = row_ann_all,
+  which = 'row',  
+  na_col = 'white',  
+  col = list(Relation = relation_colors),  
+  annotation_height = 0.3,  
+  annotation_width = unit(0.5, 'cm')
+)
+
+###Clusters
+pamClusters_all <- cluster::pam(heat_all, k = 1)
+pamClusters_all$clustering <- factor(pamClusters_all$clustering,
+                                     levels = "1",
+                                     labels = "") 
+
+pamClustersColumns_all <- cluster::pam(t(heat_all), k = 2)
+pamClustersColumns_all$clustering <- factor(
+  pamClustersColumns_all$clustering,
+  levels = c("1", "2"),
+  labels = c("CIMP-L", "CIMP-H")
+)
+
+###Heatmap
+hmap_all <- Heatmap(heat_all,
+      split = pamClusters_all$clustering,
+      cluster_row_slices = FALSE,
+      column_split = pamClustersColumns_all$clustering,
+      cluster_column_slices = FALSE,
+      name = 'All CpGs',
+      col = colorRamp2(myBreaks, myCol),
+      show_row_dend = FALSE,
+      row_title = "",
+      row_title_side = 'left',
+      show_row_names = FALSE,
+      show_column_dend = TRUE,
+      show_column_names = FALSE,
+      top_annotation = colAnn_all,
+      right_annotation = rowAnn_all
+)
+
+draw(hmap_all,
+    heatmap_legend_side = 'left',
+    annotation_legend_side = 'left'
+)
+
+
+
+###CpG Islands HEATMAP
+df_island_betas <- df_island_betas[, sapply(df_island_betas, is.numeric)]
+df_island_betas <- as.matrix(df_island_betas)  
+heat_islands <-df_island_betas
+  myBreaks <- seq(-0, 1, length.out = 100)
+
+
+ann_islands <- data.frame(
+  Clin = rgset_targets$Clinical_Subtype,
+  Mol = rgset_targets$Molecular_Subtype,
+  Inst = rgset_targets$Institution,
+  stringsAsFactors = FALSE
+)
+
+colours_islands <- list(
+  Clin = brewer.pal(4, "Set1")[1:4],
+  Mol = brewer.pal(6, "Set1")[1:6],
+  Inst = brewer.pal(3, "Set1")[1:2]
+)
+names(colours_islands$Clin) <- unique(ann_islands$Clin)
+names(colours_islands$Mol) <- unique(ann_islands$Mol)
+names(colours_islands$Inst) <- unique(ann_islands$Inst)
+
+colAnn_islands <- HeatmapAnnotation(
+  df = ann_islands,
+  which = 'col', 
+  na_col = 'white', 
+  col = colours_islands,
+  annotation_height = 0.2,
+  annotation_width = unit(0.3, 'cm')
+)
+
+###Row annotation
+row_ann_islands <- data.frame(
+  Relation = all_cpgs_betas_annot[rownames(heat_islands), "Relation_to_Island"],
+  stringsAsFactors = FALSE
+)
+rownames(row_ann_islands) <- rownames(heat_islands)
+
+
+###Clusters
+pamClusters_islands <- cluster::pam(heat_islands, k = 1)
+pamClusters_islands$clustering <- paste0('Cluster ', pamClusters_islands$clustering)
+pamClustersColumns_islands <- cluster::pam(t(heat_islands), k = 2)
+pamClustersColumns_islands$clustering <- factor(pamClustersColumns_islands$clustering, levels = c('1','2'))
+pamClustersColumns_islands$clustering <- paste0('P.in.Cluster', pamClustersColumns_islands$clustering)
+
+###Heatmap
+hmap_islands <- Heatmap(heat_islands,
+      split = pamClusters_islands$clustering,
+      cluster_row_slices = FALSE,
+      column_split = pamClustersColumns_islands$clustering,
+      cluster_column_slices = FALSE,
+      name = 'Island CpGs',
+      col = colorRamp2(myBreaks, myCol),
+      show_row_dend = FALSE,
+      row_title = "",
+      row_title_side = 'left',
+      show_row_names = FALSE,
+      show_column_dend = TRUE,
+      show_column_names = FALSE,
+      top_annotation = colAnn_islands)
+
+draw(hmap_islands,
+    heatmap_legend_side = 'left',
+    annotation_legend_side = 'left'
+)
+
+
+###CpGs SHORE-SHELF HEATMAP
+df_shore_shelf_betas <- df_shore_shelf_betas[, sapply(df_shore_shelf_betas, is.numeric)]
+df_shore_shelf_betas <- as.matrix(df_shore_shelf_betas)
+  
+heat_shore_shelf <- df_shore_shelf_betas
+  myBreaks <- seq(-0, 1, length.out = 100)
+
+
+ann_shore_shelf<- data.frame(
+    Clin = rgset_targets$Clinical_Subtype,
+    Mol = rgset_targets$Molecular_Subtype,
+    Inst = rgset_targets$Institution,
+    stringsAsFactors = FALSE)
+
+colAnn_shore_shelf<- HeatmapAnnotation(
+    df = ann_shore_shelf,
+    which = 'col', 
+    na_col = 'white', 
+    col = colours_all,
+    annotation_height = 0.3,
+    annotation_width = unit(0.5, 'cm'),
+    gap = unit(0.5, 'mm'),
+    annotation_legend_param = list(
+      Clin = list(
+        nrow = 4, 
+        title = 'Clin',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')),
+      Mol = list(
+        nrow = 5,
+        title = 'Mol',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')),
+      Inst = list(
+        nrow = 2,
+        title = 'Inst',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold'))))
+
+  
+###Clusters:
+pamClusters_shore_shelf <- cluster::pam(heat_shore_shelf, k = 1)
+pamClusters_shore_shelf$clustering <- paste0('Cluster ', pamClusters_shore_shelf$clustering)
+
+pamClustersColumns_shore_shelf <- cluster::pam(t(heat_shore_shelf), k = 2)  #adjust `k` as needed
+pamClustersColumns_shore_shelf$clustering <- paste0('ColCluster ', pamClustersColumns_shore_shelf$clustering)
+pamClustersColumns_shore_shelf$clustering <- factor(pamClustersColumns_shore_shelf$clustering, 
+                                        levels = c('ColCluster 1', 'ColCluster 2'))
+
+
+###actual heatmap
+
+hmap_shore_shelf <- Heatmap(heat_shore_shelf,
+
+      split = pamClusters_shore_shelf$clustering,
+      cluster_row_slices = FALSE,
+      column_split = pamClustersColumns_shore_shelf$clustering,
+      cluster_column_slices = FALSE,
+      name = 'Shore_Shelf CpGs',
+      col = colorRamp2(myBreaks, myCol),
+      heatmap_legend_param = list(
+        color_bar = 'continuous',
+        legend_direction = 'vertical',
+        legend_width = unit(4, 'cm'),
+        legend_height = unit(2.5, 'cm'),
+        title_position = 'topcenter',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')
+      ),
+
+      show_row_dend = TRUE,
+      row_title_side = 'left',
+      row_title_gp = gpar(fontsize = 6, fontface = 'bold'),
+      row_title_rot = 90,
+      show_row_names = FALSE,
+      row_names_gp = gpar(fontsize = 5, fontface = 'bold'),
+      row_names_side = 'left',
+      row_dend_width = unit(12, 'mm'),
+
+      show_column_dend = TRUE,
+      column_title = '',
+      column_title_side = 'bottom',
+      column_title_gp = gpar(fontsize = 6, fontface = 'bold'),
+      column_title_rot = 0,
+      show_column_names = FALSE,
+      column_names_gp = gpar(fontsize = 5, fontface = 'bold'),
+      column_names_max_height = unit(5, 'cm'),
+      column_dend_height = unit(12, 'mm'),
+
+      top_annotation = colAnn_shore_shelf)
+
+draw(hmap_shore_shelf,
+    heatmap_legend_side = 'left',
+    annotation_legend_side = 'left',
+    row_sub_title_side = 'left')
+
+###OPENSEA HEATMAP
+df_opensea_betas <- df_opensea_betas[, sapply(df_opensea_betas, is.numeric)]
+df_opensea_betas <- as.matrix(df_opensea_betas)
+  
+heat <- df_opensea_betas
+  myBreaks <- seq(-0, 1, length.out = 100)
+
+
+ann<- data.frame(
+    Clin = rgset_targets$Clinical_Subtype,
+    Mol = rgset_targets$Molecular_Subtype,
+    Inst = rgset_targets$Institution,
+    stringsAsFactors = FALSE)
+
+colAnn <- HeatmapAnnotation(
+    df = ann,
+    which = 'col', 
+    na_col = 'white', 
+    col = colours_all,
+    annotation_height = 0.3,
+    annotation_width = unit(0.5, 'cm'),
+    gap = unit(0.5, 'mm'),
+    annotation_legend_param = list(
+      Clin = list(
+        nrow = 4, 
+        title = 'Clin',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')),
+      Mol = list(
+        nrow = 5,
+        title = 'Mol',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')),
+      Inst = list(
+        nrow = 2,
+        title = 'Inst',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold'))))
+
+  
+###Clusters:
+pamClusters <- cluster::pam(heat, k = 1)
+pamClusters$clustering <- paste0('Cluster ', pamClusters$clustering)
+
+pamClustersColumns <- cluster::pam(t(heat), k = 2)  # adjust `k` as needed
+pamClustersColumns$clustering <- paste0('ColCluster ', pamClustersColumns$clustering)
+pamClustersColumns$clustering <- factor(pamClustersColumns$clustering, 
+                                        levels = c('ColCluster 1', 'ColCluster 2'))
+
+
+
+###actual heatmap
+
+hmap <- Heatmap(heat,
+
+      split = pamClusters$clustering,
+      cluster_row_slices = FALSE,
+      column_split = pamClustersColumns$clustering,
+      cluster_column_slices = FALSE,
+      name = 'OpenSea CpGs',
+      col = colorRamp2(myBreaks, myCol),
+      heatmap_legend_param = list(
+        color_bar = 'continuous',
+        legend_direction = 'vertical',
+        legend_width = unit(4, 'cm'),
+        legend_height = unit(2.5, 'cm'),
+        title_position = 'topcenter',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')
+      ),
+
+      show_row_dend = TRUE,
+      row_title_side = 'left',
+      row_title_gp = gpar(fontsize = 6, fontface = 'bold'),
+      row_title_rot = 90,
+      show_row_names = FALSE,
+      row_names_gp = gpar(fontsize = 5, fontface = 'bold'),
+      row_names_side = 'left',
+      row_dend_width = unit(12, 'mm'),
+
+      show_column_dend = TRUE,
+      column_title = '',
+      column_title_side = 'bottom',
+      column_title_gp = gpar(fontsize = 6, fontface = 'bold'),
+      column_title_rot = 0,
+      show_column_names = FALSE,
+      column_names_gp = gpar(fontsize = 5, fontface = 'bold'),
+      column_names_max_height = unit(5, 'cm'),
+      column_dend_height = unit(12, 'mm'),
+
+      top_annotation = colAnn)
+
+draw(hmap ,
+    heatmap_legend_side = 'left',
+    annotation_legend_side = 'left',
+    row_sub_title_side = 'left')
+
+
+###island_shore_shelf CpGs HEATMAP
+df_island_shore_shelf_betas <- df_island_shore_shelf_betas[, sapply(df_island_shore_shelf_betas, is.numeric)]
+df_island_shore_shelf_betas <- as.matrix(df_island_shore_shelf_betas)
+  
+heat_island_shore_shelf <- df_island_shore_shelf_betas
+  myBreaks <- seq(-0, 1, length.out = 100)
+
+
+ann_island_shore_shelf<- data.frame(
+    Clin = rgset_targets$Clinical_Subtype,
+    Mol = rgset_targets$Molecular_Subtype,
+    Inst = rgset_targets$Institution,
+    stringsAsFactors = FALSE)
+
+colAnn_island_shore_shelf <- HeatmapAnnotation(
+    df = ann_island_shore_shelf,
+    which = 'col', 
+    na_col = 'white', 
+    col = colours_all,
+    annotation_height = 0.3,
+    annotation_width = unit(0.5, 'cm'),
+    gap = unit(0.5, 'mm'),
+    annotation_legend_param = list(
+      Clin = list(
+        nrow = 4, 
+        title = 'Clin',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')),
+      Mol = list(
+        nrow = 5,
+        title = 'Mol',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')),
+      Inst = list(
+        nrow = 2,
+        title = 'Inst',
+        title_position = 'topcenter',
+        legend_direction = 'vertical',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold'))))
+
+  
+###Clusters:
+pamClusters_island_shore_shelf <- cluster::pam(heat_island_shore_shelf, k = 1)
+pamClusters_island_shore_shelf$clustering <- paste0('Cluster ', pamClusters_island_shore_shelf$clustering)
+
+pamClustersColumns_island_shore_shelf <- cluster::pam(t(heat_island_shore_shelf), k = 2)  #adjust `k` as needed
+pamClustersColumns_island_shore_shelf$clustering <- paste0('ColCluster ', pamClustersColumns_island_shore_shelf$clustering)
+
+
+
+###actual heatmap
+
+hmap_island_shore_shelf <- Heatmap(heat_island_shore_shelf,
+
+      split = pamClusters_island_shore_shelf$clustering,
+      cluster_row_slices = FALSE,
+      column_split = pamClustersColumns_island_shore_shelf$clustering,
+      cluster_column_slices = FALSE,
+      name = 'Island_Shore_Shelf CpGs',
+      col = colorRamp2(myBreaks, myCol),
+      heatmap_legend_param = list(
+        color_bar = 'continuous',
+        legend_direction = 'vertical',
+        legend_width = unit(4, 'cm'),
+        legend_height = unit(2.5, 'cm'),
+        title_position = 'topcenter',
+        title_gp = gpar(fontsize = 6, fontface = 'bold'),
+        labels_gp = gpar(fontsize = 6, fontface = 'bold')
+      ),
+
+      show_row_dend = FALSE,
+      row_title_side = 'left',
+      row_title_gp = gpar(fontsize = 6, fontface = 'bold'),
+      row_title_rot = 90,
+      show_row_names = FALSE,
+      row_names_gp = gpar(fontsize = 5, fontface = 'bold'),
+      row_names_side = 'left',
+      row_dend_width = unit(12, 'mm'),
+
+      show_column_dend = TRUE,
+      column_title = '',
+      column_title_side = 'bottom',
+      column_title_gp = gpar(fontsize = 6, fontface = 'bold'),
+      column_title_rot = 0,
+      show_column_names = FALSE,
+      column_names_gp = gpar(fontsize = 5, fontface = 'bold'),
+      column_names_max_height = unit(5, 'cm'),
+      column_dend_height = unit(12, 'mm'),
+
+      top_annotation = colAnn_island_shore_shelf)
+
+draw(hmap_island_shore_shelf,
+    heatmap_legend_side = 'left',
+    annotation_legend_side = 'left',
+    row_sub_title_side = 'left')
+
+###MEDIAN METHYLATION IN CpG ISLANDS: CIMP-L vs CIMP-H
+
+# Keep annotation for top probes only
+anno_top <- ann850k[rownames(top_betas), ]
+
+###subset cpg islands
+island_cpgs <- rownames(anno_top[anno_top$Relation_to_Island == "Island", ])
+betas_island <- top_betas[island_cpgs, ]
+
+###compute the median
+median_betas_island <- apply(betas_island, 2, median, na.rm = TRUE)
+
+###dataframe for the plot
+plot_data_island_clusters <- data.frame(
+  median_betas = median_betas_island,
+  Cluster = pamClustersColumns_all$clustering
+)
+
+###plot
+plt_island_clusters <- ggbetweenstats(
+  data = plot_data_island_clusters,
+  x = Cluster,
+  y = median_betas,
+  type = "np",
+  pairwise.comparisons = FALSE,
+  ggtheme = theme_minimal(),
+  palette = "Set2",
+  xlab = "Cluster",
+  ylab = "Median Methylation (Beta)"
+) +
+  labs(title = "Median Beta Methylation of CpG Islands by Cluster") +
+  theme(
+    text = element_text(family = "sans", size = 10, color = "black"),
+    plot.title = element_text(family = "sans", size = 20, face = "bold", color = "#2a475e"),
+    plot.subtitle = element_text(family = "sans", size = 14, face = "bold", color="#1b2838"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12),
+    axis.ticks = element_blank(),
+    axis.line = element_line(colour = "grey50"),
+    panel.grid = element_line(color = "#b4aea9"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linetype = "dashed"),
+    panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+    plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4")
+  )
+
+plt_island_clusters
+
+```
+# Differential Methylation Analysis
+
+```{r 1st part of the differential analysis}
+gc()
+set.seed(2000)
+#the factor of interest is our cluster of patients (k = 2)
+###Clusters:
+patient_clusters<-pamClustersColumns_all 
+clusters<- patient_clusters$clustering
+
+###calculating mean differences between the clusters
+
+#check cluster labels
+table(clusters)
+
+#calculating mean beta values per cluster for each CpG
+mean_CIMPL <- rowMeans(betas[, clusters == "CIMP-L"])
+mean_CIMPH <- rowMeans(betas[, clusters == "CIMP-H"])
+
+#now the pairwise calculation
+delta_CIMPL_CIMPH <- mean_CIMPL - mean_CIMPH
+
+#absolute values as aleix mentioned
+abs_delta_CIMPL_CIMPH <- abs(delta_CIMPL_CIMPH)
+
+#beta ≥ 0.2 filter
+threshold <- 0.2
+selected_CIMPL_CIMPH <- names(abs_delta_CIMPL_CIMPH[abs_delta_CIMPL_CIMPH >= threshold])
+
+#how many CpGs pass the threshold
+length(selected_CIMPL_CIMPH) ###19292
+
+#df the whole thing
+mean_diff_df <- data.frame(
+  CpG = rownames(betas),
+  Mean_CIMPL = mean_CIMPL,
+  Mean_CIMPH = mean_CIMPH,
+
+  Delta_CIMPL_CIMPH = delta_CIMPL_CIMPH,
+
+  Abs_Delta_CIMPL_CIMPH = abs_delta_CIMPL_CIMPH,
+
+  Pass_CIMPL_CIMPH = abs_delta_CIMPL_CIMPH >= threshold)
+
+###start differential analysis based on positions
+all(colnames(Mval) == names(clusters)) ###order matches
+sample_order <- colnames(Mval)
+###Extract covariates
+clusters <- factor(clusters)  # already aligned
+sentrix_positions <- factor(rgset_targets$Sentrix_Position)
+age <- as.numeric(rgset_targets$Age)  # must be numeric
+subtype <- factor(rgset_targets$Molecular_Subtype)
+
+
+###check if names match
+stopifnot(all(names(clusters) == rgset_targets$id))
+
+###build design matrix
+design <- model.matrix(~ 0 + clusters + sentrix_positions + age + subtype)
+
+colnames(design) <- make.names(colnames(design))
+rownames(design) <- sample_order
+
+###lm
+fit <- lmFit(Mval, design)
+
+###contrasts
+contrasts <- makeContrasts(
+  CIMPL_vs_CIMPL = clustersCIMP.L - clustersCIMP.H,
+  levels = design
+)
+fit2 <- contrasts.fit(fit, contrasts)
+fit2 <- eBayes(fit2)
+
+###extract the results
+summary(decideTests(fit2))
+```
+
+# Volcano Plot Using Beta Values:
+
+
+```{r}
+gc()
+set.seed(2000)
+
+####Cluster info
+patient_clusters2 <- pamClustersColumns_all   # new object name
+clusters2 <- patient_clusters2$clustering
+
+###check the distribution
+table(clusters2)
+
+###Mean beta values per cluster
+mean_beta_C1 <- rowMeans(betas[, clusters2 == "CIMP-L"])
+mean_beta_C2 <- rowMeans(betas[, clusters2 == "CIMP-H"])
+
+###Pairwise
+delta_beta_C1_C2 <- mean_beta_C1 - mean_beta_C2
+abs_delta_beta_C1_C2 <- abs(delta_beta_C1_C2)
+
+###threshold
+beta_threshold <- 0.2
+selected_beta_C1_C2 <- names(abs_delta_beta_C1_C2[abs_delta_beta_C1_C2 >= beta_threshold])
+length(selected_beta_C1_C2)
+
+###df the whole thing
+mean_diff_beta_df <- data.frame(
+  CpG = rownames(betas),
+  Mean_Cluster1 = mean_beta_C1,
+  Mean_Cluster2 = mean_beta_C2,
+  Delta_C1_C2 = delta_beta_C1_C2,
+  Abs_Delta_C1_C2 = abs_delta_beta_C1_C2,
+  Pass_Threshold = abs_delta_beta_C1_C2 >= beta_threshold
+)
+
+###Differential analysis using betas
+###make sure col names match
+all(colnames(betas) == names(clusters2))  # should be TRUE
+
+###define and factorize our covariates 
+clusters2 <- factor(clusters2)
+sentrix_pos2 <- factor(rgset_targets$Sentrix_Position)
+age2 <- as.numeric(rgset_targets$Age)
+subtype2 <- factor(rgset_targets$Molecular_Subtype)
+clin_subtype2 <- factor(rgset_targets$Clinical_Subtype)
+
+stopifnot(all(names(clusters2) == rgset_targets$id))
+
+###design matrix
+design_beta <- model.matrix(~0 + clusters2 + sentrix_pos2 + age2 + subtype2)
+colnames(design_beta) <- make.names(colnames(design_beta))
+rownames(design_beta) <- colnames(betas)
+
+###fit linear model
+fit_beta <- lmFit(betas, design_beta)
+
+###form contrasts which are our clusters
+contrast_beta <- makeContrasts(
+  CIMPL_vs_CIMPH = clusters2CIMP.L - clusters2CIMP.H,
+  levels = design_beta
+)
+fit_beta2 <- contrasts.fit(fit_beta, contrast_beta)
+fit_beta2 <- eBayes(fit_beta2)
+
+###extract the results
+res_beta <- topTable(fit_beta2, number = nrow(betas), adjust.method = "BH")
+sig_beta_dmps <- subset(res_beta, adj.P.Val < 0.05)
+
+###volcano plot
+
+###hyper/hypo annotation based on logFC threshold
+sig_beta_dmps$Direction <- ifelse(sig_beta_dmps$logFC >= 0.2, "Hyper", 
+                                  ifelse(sig_beta_dmps$logFC <= -0.2, "Hypo", "NS"))
+
+### Merge results with mean beta differences
+res_beta$CpG <- rownames(res_beta)
+volcano_df <- merge(res_beta, mean_diff_beta_df, by = "CpG")
+
+# annotate direction based on BOTH |Δβ| ≥ 0.2 and adj.P.Val < 0.05
+volcano_df$Direction <- ifelse(volcano_df$Abs_Delta_C1_C2 >= 0.2 & volcano_df$adj.P.Val < 0.05,
+                               ifelse(volcano_df$Delta_C1_C2 > 0, "Hyper", "Hypo"),
+                               "NS")
+
+# Volcano plot with cutoffs
+ggplot(volcano_df, aes(x = Delta_C1_C2, y = -log10(adj.P.Val), color = Direction)) +
+  geom_point(alpha = 0.6) +
+  scale_color_manual(values = c("Hyper" = "red", "Hypo" = "blue", "NS" = "grey")) +
+  geom_vline(xintercept = c(-0.2, 0.2), linetype = "dashed", color = "darkgrey") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black") +
+  annotate("text", x = max(volcano_df$Delta_C1_C2, na.rm = TRUE), 
+           y = -log10(0.05), label = "padj = 0.05",
+           vjust = -1, hjust = 1, size = 1, color = "black") +
+  labs(
+       x = "Delta Beta (Hypo - Hyper)", y = "-log10(adj.P.Val)") +
+  theme_minimal()
+
+```
+
+# Cluster 1 vs Cluster 2:
+
+```{r}
+set.seed(2000)
+###extract all probes
+res <- topTable(fit2, number = nrow(Mval), adjust.method = "BH")
+res$CpG <- rownames(res)
+selected_dmp_ids <- rownames(subset(res, adj.P.Val < 0.05 & abs(logFC) >= 0.2))
+length(selected_dmp_ids)
+###remove NAs
+molecular_subtypes <- rgset_targets$Molecular_Subtype
+molecular_subtypes_clean <- molecular_subtypes
+molecular_subtypes_clean[is.na(molecular_subtypes_clean)] <- "Unknown"
+
+clusters <- factor(patient_clusters$clustering, levels = c("CIMP-L", "CIMP-H"))
+
+### --- ANALYSIS 1: ALL PROBES ---
+
+###median per sample
+median_betas_all <- apply(betas, 2, median, na.rm = TRUE)
+plot_data_all <- data.frame(
+  median_betas = median_betas_all,
+  Cluster = clusters
+)
+
+###plot
+plt_all <- ggbetweenstats(
+  data = plot_data_all,
+  x = Cluster,
+  y = median_betas,
+  type = "np",
+  pairwise.comparisons = FALSE,
+  ggtheme = theme_minimal(),
+  palette = "Set2",
+  xlab = "Cluster",
+  ylab = "Median Methylation (Beta)"
+) +
+  labs(title = "Median Beta Methylation per Sample by Cluster") +
+  theme(
+    text = element_text(family = "sans", size = 10, color = "black"),
+    plot.title = element_text(family = "sans", size = 20, face = "bold", color = "#2a475e"),
+    plot.subtitle = element_text(family = "sans", size = 14, face = "bold", color="#1b2838"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12),
+    axis.ticks = element_blank(),
+    axis.line = element_line(colour = "grey50"),
+    panel.grid = element_line(color = "#b4aea9"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linetype = "dashed"),
+    panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+    plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4")
+  )
+
+plt_all
+
+
+###t-SNE on all probes
+betas_tsne_all <- t(betas) 
+tsne_all <- Rtsne(betas_tsne_all, perplexity = 5)
+df_tsne_all <- data.frame(
+  Dim1 = tsne_all$Y[,1],
+  Dim2 = tsne_all$Y[,2],
+  Cluster = clusters
+)
+
+ggplot(df_tsne_all, aes(x = Dim1, y = Dim2, fill = factor(Cluster))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4, alpha = 2) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "t-SNE on All Probes", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 20),
+    axis.title = element_text(color = "black", size = 14),
+    axis.text = element_text(color = "black", size = 12)
+  )
+
+# --- ANALYSIS 2: INTERSECTED DMPs ---
+
+###subet
+betas_dmp <- betas[selected_dmp_ids, ]
+
+### --- ANALYSIS 2: INTERSECTED DMPs ---
+
+###median beta per sample (DMPs)
+median_betas_dmp <- apply(betas_dmp, 2, median, na.rm = TRUE)
+plot_data_dmp <- data.frame(
+  median_betas = median_betas_dmp,
+  Cluster = clusters
+)
+
+
+###plot
+plt_dmp <- ggbetweenstats(
+  data = plot_data_dmp,
+  x = Cluster,
+  y = median_betas,
+  type = "np",
+  pairwise.comparisons = FALSE,
+  ggtheme = theme_minimal(),
+  palette = "Set2",
+  xlab = "Cluster",
+  ylab = "Median Methylation (Beta)"
+) +
+  labs(title = "Median Beta Methylation (DMPs) by Cluster") +
+  theme(
+    text = element_text(family = "sans", size = 10, color = "black"),
+    plot.title = element_text(family = "sans", size = 20, face = "bold", color = "#2a475e"),
+    plot.subtitle = element_text(family = "sans", size = 14, face = "bold", color="#1b2838"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12),
+    axis.ticks = element_blank(),
+    axis.line = element_line(colour = "grey50"),
+    panel.grid = element_line(color = "#b4aea9"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linetype = "dashed"),
+    panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+    plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4")
+  )
+
+plt_dmp
+
+
+###Heatmap
+###annotation
+annotation_col <- data.frame(Cluster = clusters)
+rownames(annotation_col) <- colnames(betas_dmp)
+
+###level the clusters
+cluster_levels <- levels(clusters)
+
+###colors
+n_colors <- max(length(cluster_levels), 3)
+annotation_colors <- list(
+  Cluster = setNames(brewer.pal(n_colors, "Set1")[1:length(cluster_levels)], cluster_levels)
+)
+
+###plot the heatmap
+pheatmap(betas_dmp,
+         annotation_col = annotation_col,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         clustering_method = "ward.D2",
+         main = "Significant DMPs: CIMP-L vs CIMP-H",
+         color = colorRampPalette(c("green", "black", "red"))(100),
+         annotation_colors = annotation_colors)
+
+### t-SNE on DMPs
+betas_tsne_dmp <- t(betas_dmp)
+tsne_dmp <- Rtsne(betas_tsne_dmp, perplexity = 5)
+df_tsne_dmp <- data.frame(
+  Dim1 = tsne_dmp$Y[,1],
+  Dim2 = tsne_dmp$Y[,2],
+  Cluster = clusters
+)
+
+ggplot(df_tsne_dmp, aes(x = Dim1, y = Dim2, fill = factor(Cluster))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4, alpha = 0.8) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "t-SNE on DMPs", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 20),
+    axis.title = element_text(color = "black", size = 14),
+    axis.text = element_text(color = "black", size = 12)
+  )
+
+
+### --- ANALYSIS 3: BY MOLECULAR SUBTYPE ---
+
+###median beta per sample (DMPs)
+median_betas_dmp <- apply(betas_dmp, 2, median, na.rm = TRUE)
+plot_data_subtype <- data.frame(
+  median_betas = median_betas_dmp,
+  Molecular_Subtype = molecular_subtypes_clean
+)
+
+###plot for mol subtype
+plt_subtype <- ggbetweenstats(
+  data = plot_data_subtype,
+  x = Molecular_Subtype,
+  y = median_betas,
+  type = "np",
+  pairwise.comparisons = FALSE,
+  ggtheme = theme_minimal(),
+  palette = "Set2",
+  xlab = "Molecular Subtype",
+  ylab = "Median Methylation (Beta)"
+) +
+  labs(title = "Median Beta Methylation (DMPs) Across Molecular Subtypes") +
+  theme(
+    text = element_text(family = "sans", size = 10, color = "black"),
+    plot.title = element_text(family = "sans", size = 20, face = "bold", color = "#2a475e"),
+    plot.subtitle = element_text(family = "sans", size = 14, face = "bold", color="#1b2838"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12),
+    axis.ticks = element_blank(),
+    axis.line = element_line(colour = "grey50"),
+    panel.grid = element_line(color = "#b4aea9"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linetype = "dashed"),
+    panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+    plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4")
+  )
+
+plt_subtype
+
+
+###factorize
+clusters <- factor(clusters)
+molecular_subtypes_clean <- factor(molecular_subtypes_clean)
+
+###annotation
+annotation_col <- data.frame(
+  Cluster = clusters,
+  Molecular_Subtype = molecular_subtypes_clean
+)
+rownames(annotation_col) <- colnames(betas_dmp)
+
+get_named_colors <- function(factor_vector, palette = "Set1") {
+  lvls <- levels(factor_vector)
+  n_colors <- max(length(lvls), 3)  
+  colors <- brewer.pal(n_colors, palette)[1:length(lvls)]
+  setNames(colors, lvls)
+}
+
+###colors
+annotation_colors <- list(
+  Cluster = get_named_colors(clusters),
+  Molecular_Subtype = get_named_colors(molecular_subtypes_clean)
+)
+
+###plot the heatmap
+pheatmap(
+  betas_dmp,
+  annotation_col = annotation_col,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  clustering_method = "ward.D2",
+  main = "Heatmap: Significant DMPs by Molecular Subtype",
+  color = colorRampPalette(c("green", "black", "red"))(100),
+  annotation_colors = annotation_colors
+)
+
+### t-SNE
+betas_tsne_dmp <- t(betas_dmp)
+tsne_dmp <- Rtsne(betas_tsne_dmp, perplexity = 5)
+df_tsne_dmp <- data.frame(
+  Dim1 = tsne_dmp$Y[,1],
+  Dim2 = tsne_dmp$Y[,2],
+  Molecular_Subtype = molecular_subtypes_clean
+)
+
+ggplot(df_tsne_dmp, aes(x = Dim1, y = Dim2, fill = factor(Molecular_Subtype))) +
+  geom_point(size = 5, shape = 21, color = "black", stroke = 0.4, alpha = 0.8) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(title = "t-SNE on DMPs by Molecular Subtype", x = "t-SNE1", y = "t-SNE2") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 20),
+    axis.title = element_text(color = "black", size = 14),
+    axis.text = element_text(color = "black", size = 12)
+  )
+
+
+
+###Get annotation
+anno <- getAnnotation(rgSet)
+
+###cpgs
+valid_cpgs <- intersect(selected_dmp_ids, rownames(anno))
+betas_dmp <- betas[valid_cpgs, ]
+anno_dmp <- anno[valid_cpgs, ]
+
+###build the df for plotting
+plot_data_island <- do.call(rbind, lapply(unique(anno_dmp$Relation_to_Island), function(cat) {
+  cpgs <- rownames(anno_dmp[anno_dmp$Relation_to_Island == cat, ])
+  if (length(cpgs) == 0) return(NULL) 
+  medians <- apply(betas_dmp[cpgs, , drop = FALSE], 2, median, na.rm = TRUE)
+  data.frame(
+    median_betas = medians,
+    Relation_to_Island = cat,
+    Sample = colnames(betas_dmp)
+  )
+}))
+
+###plotting
+plt_island <- ggbetweenstats(
+  data = plot_data_island,
+  x = Relation_to_Island,
+  y = median_betas,
+  type = "np",
+  pairwise.comparisons = FALSE,
+  ggtheme = theme_minimal(),
+  palette = "Set2",
+  xlab = "CpG Relation to Island",
+  ylab = "Median Methylation (Beta)"
+) +
+  labs(title = "Median Beta Methylation of DMPs by Relation to Island") +
+  theme(
+    text = element_text(family = "sans", size = 10, color = "black"),
+    plot.title = element_text(family = "sans", size = 20, face = "bold", color = "#2a475e"),
+    plot.subtitle = element_text(family = "sans", size = 14, face = "bold", color="#1b2838"),
+    plot.title.position = "plot",
+    axis.text = element_text(size = 10, color = "black"),
+    axis.title = element_text(size = 12),
+    axis.ticks = element_blank(),
+    axis.line = element_line(colour = "grey50"),
+    panel.grid = element_line(color = "#b4aea9"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linetype = "dashed"),
+    panel.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4"),
+    plot.background = element_rect(fill = "#fbf9f4", color = "#fbf9f4")
+  )
+
+plt_island
+
+```
+
+# DMPs Figures
+
+
+```{r DMPs}
+###define which columns to keep
+columns_to_keep <- c(1:4, 18:19, 22:24, 30:31)
+
+###cpg names:
+probes_in_fit <- rownames(fit$coefficients)
+
+###annotate
+idx <- match(probes_in_fit, ann850k$Name)
+
+###remove nas
+valid_idx <- idx[!is.na(idx)]
+
+###subset
+ann850kSub <- ann850k[valid_idx, ]
+
+rownames(ann850kSub) <- ann850k$Name[valid_idx]
+
+ann850kSub <- ann850kSub[, columns_to_keep]
+
+###padjusted
+DMPs_1 <- topTable(fit2, num=Inf, coef=1, genelist=ann850kSub)
+DMPs_1 <- DMPs_1[DMPs_1$adj.P.Val < 0.05,]
+dim(DMPs_1)
+write.csv(DMPs_1, file = "Significant_DMPs_List.csv", row.names = FALSE)
+
+
+###Barplot DMPs by Relation to Island
+rel_island_perc <- prop.table(table(DMPs_1$Relation_to_Island)) * 100 ###percentage 
+ggplot(DMPs_1, aes(x = Relation_to_Island)) +
+  geom_bar(aes(y = (..count..) / sum(..count..) * 100), fill = "steelblue") +
+  geom_text(stat = "count",
+            aes(y = (..count..) / sum(..count..) * 100,
+                label = sprintf("%.1f%%", (..count..) / sum(..count..) * 100)),
+            vjust = -0.5, size = 3) +
+  labs(
+    title = "DMPs by Relation to Island",
+    x = "Relation to CpG Island",
+    y = "Percentage (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+###refgene annotation
+DMPs_1 <- DMPs_1 %>%
+  mutate(Main_RefGene_Group = sub(";.*", "", UCSC_RefGene_Group))
+
+###split the data
+DMPs_opensea <- DMPs_1 %>% filter(Relation_to_Island == "OpenSea")
+DMPs_non_opensea <- DMPs_1 %>% filter(Relation_to_Island != "OpenSea")
+
+###OpenSea (percentages + labels)
+ggplot(DMPs_opensea, aes(x = Main_RefGene_Group)) +
+  geom_bar(aes(y = (..count..) / sum(..count..) * 100), fill = "steelblue") +
+  geom_text(stat = "count",
+            aes(y = (..count..) / sum(..count..) * 100,
+                label = sprintf("%.1f%%", (..count..) / sum(..count..) * 100)),
+            vjust = -0.5, size = 3) +
+  labs(
+    title = "UCSC RefGene Group (First Entry) - OpenSea DMPs",
+    x = "Main UCSC RefGene Group",
+    y = "Percentage (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+###Non-OpenSea (percentages + labels)
+ggplot(DMPs_non_opensea, aes(x = Main_RefGene_Group)) +
+  geom_bar(aes(y = (..count..) / sum(..count..) * 100), fill = "steelblue") +
+  geom_text(stat = "count",
+            aes(y = (..count..) / sum(..count..) * 100,
+                label = sprintf("%.1f%%", (..count..) / sum(..count..) * 100)),
+            vjust = -0.5, size = 3) +
+  labs(
+    title = "UCSC RefGene Group (First Entry) - Non-OpenSea DMPs",
+    x = "Main UCSC RefGene Group",
+    y = "Percentage (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Cluster Survival Analysis
+
+```{r Survival Analysis}
+gc()
+#data frame with the id and their corresponding cluster labels
+patient_clusters <- data.frame(
+  id = colnames(top_betas),  # Column names of top_betas correspond to Patient_IDs
+  Cluster = pamClustersColumns_all$clustering
+)
+
+merged_surv_data <- merge(rgset_targets, patient_clusters, by = "id", all.x = TRUE)
+###at 60 months
+merged_surv_data$capped_time_60 <- pmin(merged_surv_data$OS_month, 60)
+merged_surv_data$capped_OS_Status_60 <- ifelse(merged_surv_data$OS_month <= 60 & merged_surv_data$OS_Status == 1, 1, 0)
+
+###at 24 months
+merged_surv_data$capped_time_24 <- pmin(merged_surv_data$OS_month, 24)
+merged_surv_data$capped_OS_Status_24 <- ifelse(merged_surv_data$OS_month <= 24 & merged_surv_data$OS_Status == 1, 1, 0)
+
+###factors
+merged_surv_data$Cluster <- as.factor(merged_surv_data$Cluster)
+
+###survival objects
+surv_obj_24 <- Surv(time = merged_surv_data$capped_time_24, event = merged_surv_data$capped_OS_Status_24)
+surv_obj_60 <- Surv(time = merged_surv_data$capped_time_60, event = merged_surv_data$capped_OS_Status_60)
+
+###kaplan-Meier by cluster
+sfit_24 <- survfit(surv_obj_24 ~ Cluster, data = merged_surv_data)
+sfit_60 <- survfit(surv_obj_60 ~ Cluster, data = merged_surv_data)
+
+summary(sfit_24)
+summary(sfit_60)
+
+logrank_24 <- survdiff(surv_obj_24 ~ Cluster, data = merged_surv_data)
+logrank_60 <- survdiff(surv_obj_60 ~ Cluster, data = merged_surv_data)
+
+cat("Log-rank test 24 months p-value: ", signif(1 - pchisq(logrank_24$chisq, df = length(logrank_24$n) - 1), 3), "\n")
+cat("Log-rank test 60 months p-value: ", signif(1 - pchisq(logrank_60$chisq, df = length(logrank_60$n) - 1), 3), "\n")
+
+cox_24 <- coxph(surv_obj_24 ~ Cluster, data = merged_surv_data)
+cox_60 <- coxph(surv_obj_60 ~ Cluster, data = merged_surv_data)
+
+cat("Cox model (24 months):\n")
+print(summary(cox_24))
+
+cat("Cox model (60 months):\n")
+print(summary(cox_60))
+
+
+###with covariates
+cox_24_adj <- coxph(surv_obj_24 ~ Cluster + Molecular_Subtype, data = merged_surv_data)
+cox_60_adj <- coxph(surv_obj_60 ~ Cluster + Molecular_Subtype, data = merged_surv_data)
+
+cat("\n--- Cox model summary (24 months, adjusted) ---\n")
+print(summary(cox_24_adj))
+
+cat("\n--- Cox model summary (60 months, adjusted) ---\n")
+print(summary(cox_60_adj))
+
+cox_firth_60 <- coxphf(surv_obj_60 ~ Cluster + Molecular_Subtype, data = merged_surv_data)
+cox_firth_24 <- coxphf(surv_obj_24 ~ Cluster + Molecular_Subtype, data = merged_surv_data)
+
+summary(cox_firth_24)
+summary(cox_firth_60)
+cox.zph(cox_24_adj) 
+cox.zph(cox_60_adj) 
+
+#survival curve
+
+ggsurvplot(sfit_24, pval=TRUE, risk.table = TRUE ,
+           risk.table.height=.35, 
+           break.time.by = 12,
+           conf.int = T)
+
+ggsurvplot(sfit_60, pval=TRUE, risk.table=TRUE,
+           risk.table.height=.35, 
+           break.time.by = 12,
+           conf.int = T)
+
+```
+
+
+# Gene Ontology:
+
+```{r}
+###getting dmps
+
+ontology_table <-  topTable(fit2, num=Inf, coef=1, genelist=ann850kSub)
+
+###extract p-value
+cpg.pval <- setNames(ontology_table$adj.P.Val, ontology_table$Name)
+
+###perform gene ontology
+ontology <- methylgometh(
+  cpg.pval = cpg.pval,
+  sig.cut = 0.05,
+  array.type = "EPIC"
+)
+
+ontology <- ontology[ontology$padj<.05,]
+
+
+###Split by ontology category
+ontology_BP <- subset(ontology, Description == "BP")
+ontology_MF <- subset(ontology, Description == "MF")
+ontology_CC <- subset(ontology, Description == "CC")
+
+###create a plotting function 
+plot_GO <- function(data, title) {
+  ggplot(data, aes(x = -log10(padj),
+                   y = reorder(Ont, -padj),
+                   fill = -log10(padj))) +      
+    geom_col() +
+    scale_fill_gradient(low = "blue", high = "red", name = "-log10(padj)") +
+    labs(y = "Biological Term / Pathway",
+         x = "-log10(FDR adjusted p-value)",
+         title = paste("Enriched", title, "Terms")) +
+    theme_minimal() +
+    theme(
+      text = element_text(size = 10),
+      axis.text.y = element_text(size = 8),
+      plot.title = element_text(size = 14, face = "bold")
+    )
+}
+
+###plot them
+plot_BP <- plot_GO(ontology_BP, "Biological Process (BP)")
+plot_MF <- plot_GO(ontology_MF, "Molecular Function (MF)")
+plot_CC <- plot_GO(ontology_CC, "Cellular Component (CC)")
+plot_BP
+plot_MF 
+plot_CC 
+
+```
+
+# Genes Overlapping with Multiple CpGs:
+
+```{r}
+###extract cpgs
+dmps <- topTable(fit2, number = Inf, genelist = ann850kSub)
+
+###extract significant ones
+dmps$Delta_Beta <- mean_diff_df$Delta_CIMPL_CIMPH[match(dmps$Name, mean_diff_df$CpG)]
+dmps_filtered <- subset(dmps, adj.P.Val < 0.05 & abs(Delta_Beta) >= 0.2)
+
+dim(dmps_filtered)
+
+# Extract only the first gene term
+dmps_filtered$First_Gene <- sapply(strsplit(dmps_filtered$UCSC_RefGene_Name, ";"), `[`, 1)
+
+# Count number of CpGs per first gene
+dmps_per_gene <- dmps_filtered %>%
+  group_by(First_Gene) %>%
+  summarise(Num_CpGs = n()) %>%
+  arrange(desc(Num_CpGs))
+
+dmps_per_gene <- dmps_per_gene %>%
+  arrange(desc(Num_CpGs), First_Gene)
+
+dmps_per_gene
+
+write.csv(dmps_per_gene, "Top_DMPs_per_gene.csv", row.names = FALSE)
+
+```
+
+
+# Association between clusters and the molecular subtypes 
+
+```{r}
+gc()
+#data frame with the id and their corresponding cluster labels
+patient_clusters <- data.frame(
+  id = colnames(top_betas),  # Column names of top_betas correspond to Patient_IDs
+  Cluster = pamClustersColumns_all$clustering
+)
+
+merged_surv_data <- merge(rgset_targets, patient_clusters, by = "id", all.x = TRUE)
+###at 60 months
+merged_surv_data$capped_time_60 <- pmin(merged_surv_data$OS_month, 60)
+merged_surv_data$capped_OS_Status_60 <- ifelse(merged_surv_data$OS_month <= 60 & merged_surv_data$OS_Status == 1, 1, 0)
+
+###at 24 months
+merged_surv_data$capped_time_24 <- pmin(merged_surv_data$OS_month, 24)
+merged_surv_data$capped_OS_Status_24 <- ifelse(merged_surv_data$OS_month <= 24 & merged_surv_data$OS_Status == 1, 1, 0)
+
+###factors
+merged_surv_data$Cluster <- as.factor(merged_surv_data$Cluster)
+
+###with nas
+merged_surv_data <- merged_surv_data %>%
+  mutate(
+    Subtype_merged = case_when(
+      Molecular_Subtype %in% c("LumA", "LumB", "Normal") ~ "Luminal_Normal",
+      Molecular_Subtype %in% c("Basal", "Her2") ~ "Aggressive",
+      TRUE ~ as.character(Molecular_Subtype)  
+    ),
+    # Set reference to Luminal_Normal group
+    Subtype_merged = relevel(factor(Subtype_merged), ref = "Luminal_Normal")
+  )
+
+table(
+  Original = merged_surv_data$Molecular_Subtype,
+  Merged = merged_surv_data$Subtype_merged, 
+  useNA = "always"
+)
+
+mode<- coxphf(
+  Surv(capped_time_60, capped_OS_Status_60) ~ Cluster + Subtype_merged,
+  data = merged_surv_data
+)
+
+summary(mode)
+
+###without nas:
+
+merged_surv_data <- merged_surv_data %>%
+  mutate(
+    Subtype_refined = case_when(
+      Molecular_Subtype %in% c("LumA", "LumB") ~ "Luminal",
+      Molecular_Subtype == "Normal" ~ "Normal",
+      Molecular_Subtype %in% c("Basal", "Her2") ~ "Aggressive",
+      TRUE ~ NA_character_  # Will be removed
+    ),
+    Subtype_refined = relevel(factor(Subtype_refined), ref = "Luminal")
+  ) %>%
+  filter(!is.na(Subtype_refined))
+table(merged_surv_data$Subtype_refined, merged_surv_data$capped_OS_Status_60)
+
+refined_model <- coxphf(
+  Surv(capped_time_60, capped_OS_Status_60) ~ Cluster + Subtype_refined,
+  data = merged_surv_data
+)
+summary(refined_model)
+
+###fishers and chisq
+chisq.test(merged_surv_data$Cluster, merged_surv_data$Subtype_refined)
+fisher.test(merged_surv_data$Cluster, merged_surv_data$Subtype_refined)
+
+surv_obj <- Surv(merged_surv_data$capped_time_60, merged_surv_data$capped_OS_Status_60)
+merged_surv_data$Strata <- interaction(merged_surv_data$Cluster, merged_surv_data$Subtype_refined)
+
+km_fit_strata <- survfit(surv_obj ~ Strata, data = merged_surv_data)
+
+ggsurvplot(
+  km_fit_strata,
+  data = merged_surv_data,
+  risk.table = TRUE,
+  pval = TRUE,
+  conf.int = TRUE,
+  title = "Survival by Cluster + Subtype",
+  xlab = "Months",
+  ylab = "Survival Probability",
+  legend.title = "Group",
+  palette = "Dark2"
+)
+
+
+###Subset to Aggressive patients only
+aggr_data <- merged_surv_data[merged_surv_data$Subtype_refined == "Aggressive", ]
+
+###survival object
+surv_obj_aggr <- Surv(aggr_data$capped_time_60, aggr_data$capped_OS_Status_60)
+
+###km
+km_fit_aggr <- survfit(surv_obj_aggr ~ Cluster, data = aggr_data)
+
+# Plot
+ggsurvplot(
+  km_fit_aggr,
+  data = aggr_data,
+  risk.table = TRUE,
+  pval = TRUE,
+  conf.int = TRUE,
+  title = "Survival in Aggressive Subtype Patients by Cluster - 5 Years",
+  xlab = "Time (months)",
+  ylab = "Overall Survival Probability",
+  legend.title = "Cluster"
+)
+
+###cont table
+merged_surv_data$IsAggressive <- ifelse(merged_surv_data$Subtype_refined == "Aggressive", "Aggressive", "Non-Aggressive")
+table_cluster_aggressive <- table(Cluster = merged_surv_data$Cluster, AggressiveStatus = merged_surv_data$IsAggressive)
+print(table_cluster_aggressive)
+
+###agrgessive cont table
+aggressive_patients <- merged_surv_data %>%
+  filter(Molecular_Subtype %in% c("Basal", "Her2"))
+table_cluster_subtype <- table(
+  Cluster = aggressive_patients$Cluster,
+  Molecular_Subtype = aggressive_patients$Molecular_Subtype
+)
+print(table_cluster_subtype)
+```
+
+# Uni and Multivariate analysis on the probes
+
+```{r}
+set.seed(2000)
+gc()
+
+DMPs_1_sig <- subset(DMPs_1, adj.P.Val <.05)
+bio_sig_cpgs <- subset(mean_diff_df, Pass_CIMPL_CIMPH == "TRUE" )
+common_sig_cpgs <- intersect(rownames(DMPs_1_sig), rownames(bio_sig_cpgs))
+length(common_sig_cpgs)
+###getting the beta values of the DMPs
+cox_betas <- intersect(common_sig_cpgs, rownames(betas))  
+length(cox_betas)
+cox_betas <- betas[cox_betas, ]    
+nrow(cox_betas)
+###prepare metadata
+common_samples <- intersect(colnames(cox_betas), rgset_targets$id)  
+cox_betas <- cox_betas[, common_samples]  
+
+cox_meta <- as.data.frame(rgset_targets[match(common_samples, rgset_targets$id), ])
+cox_betas_t <- as.data.frame(t(cox_betas))
+cox_betas_t$id <- colnames(cox_betas)
+
+###merge
+cox_data <- merge(cox_meta, cox_betas_t, by = "id")
+###add cluster data:
+
+patient_clusters <- data.frame(
+  id = colnames(top_betas), 
+  Cluster = pamClustersColumns_all$clustering
+)
+cox_data <- merge(cox_data, patient_clusters, by.x = "id", by.y="id")
+
+###include covarites
+cox_data$Clinical_Subtype <- factor(cox_data$Clinical_Subtype)
+cox_data$Molecular_Subtype <- factor(cox_data$Molecular_Subtype)
+cox_data$Age <- as.numeric(cox_data$Age)
+cox_data$OS_month <- as.numeric(cox_data$OS_month)
+cox_data$OS_Status <- as.numeric(cox_data$OS_Status)
+cox_data$Cluster <- factor(cox_data$Cluster)
+cox_data$Sentrix_Position <- factor(cox_data$Sentrix_Position)
+cpg_cols <- grep("^cg", colnames(cox_data), value = TRUE)
+probe_names <- grep("^cg", names(cox_data), value = TRUE)
+
+covariates <- c("Age", "Clinical_Subtype", "Molecular_Subtype", "OS_month", "OS_Status", "Cluster", "Sentrix_Position")
+
+###remove NAs:
+cox_data_filtered <- cox_data[complete.cases(cox_data[, covariates]), ]
+
+###at 60 months
+cox_data_filtered$capped_time_60 <- pmin(cox_data_filtered$OS_month, 60)
+cox_data_filtered$capped_OS_Status_60 <- ifelse(cox_data_filtered$OS_month <= 60 & cox_data_filtered$OS_Status == 1, 1, 0)
+
+###at 24 months
+cox_data_filtered$capped_time_24 <- pmin(cox_data_filtered$OS_month, 24)
+cox_data_filtered$capped_OS_Status_24 <- ifelse(cox_data_filtered$OS_month <= 24 & cox_data_filtered$OS_Status == 1, 1, 0)
+
+
+variables <- grep("^cg[0-9]+", colnames(cox_data_filtered), value = TRUE)
+
+###cov
+covariates <- c("Molecular_Subtype", "Age", "Clinical_Subtype", "Cluster", "Sentrix_Position")
+
+
+###Univariate Analysis
+univ_res <- RegParallel(
+  data = cox_data_filtered,
+  formula = "Surv(capped_time_60, capped_OS_Status_60) ~ [*]",
+  FUN = function(formula, data) {
+    coxph(formula = formula, data = data, ties = "breslow")
+  },
+  FUNtype = "coxph",  
+  variables = variables,
+  blocksize = 2000,
+  p.adjust = "BH"
+)
+sig_probes <- univ_res$Term[univ_res$P < 0.05]
+sig_probes <- gsub("_group", "", sig_probes)
+base_probe_names <- gsub("Low|High", "", sig_probes)
+available_probes <- intersect(base_probe_names, grep("^cg", names(cox_data_filtered), value = TRUE))
+print(paste("Number of available probes:", length(available_probes)))
+
+###multivariate analysis
+if(length(available_probes) > 0) {
+  multiv_res <- RegParallel(
+    data = cox_data_filtered,
+    formula = "Surv(capped_time_60, capped_OS_Status_60) ~ [*] + Molecular_Subtype",
+    FUN = function(formula, data) {
+      coxph(formula = formula, data = data, ties = "breslow")
+    },
+    FUNtype = "coxph",
+    variables = available_probes,
+    blocksize = 1500,
+    p.adjust = "BH"
+  )
+}
+sig_probes <- multiv_res %>%
+  filter(Term == Variable)
+sig_probes <- sig_probes[sig_probes$P.adj < 0.05, ]
+probe_names <- sig_probes$Term
+data("Manifest")
+annot <- ann850k[probe_names, c("chr", "pos", "UCSC_RefGene_Name", "Relation_to_Island", "UCSC_RefGene_Group")]
+final_results <- cbind(sig_probes, annot)
+
+write.csv(final_results, "12 cpgs.csv", row.names = FALSE)
+```
+
+# KM Curves: High vs Low (Risk)
+
+```{r}
+###create model df with the 12 probes
+model_df <- cox_data_filtered[, c("capped_time_60","capped_OS_Status_60", 'id', probe_names)]
+model_df <- model_df[complete.cases(model_df), ]
+
+###multivariate cox
+cox_formula <- as.formula(
+  paste("Surv(capped_time_60, capped_OS_Status_60) ~", paste(probe_names, collapse = " + "))
+)
+cox12 <- coxph(cox_formula, data = model_df,x = TRUE)
+
+###compute lp
+model_df$risk_score <- predict(cox12, type = "lp")
+
+###stratiyf based on the median
+cut_med <- median(model_df$risk_score, na.rm = TRUE)
+model_df$risk_group <- ifelse(model_df$risk_score > cut_med, "High", "Low")
+model_df$risk_group <- factor(model_df$risk_group, levels = c("Low","High"))
+
+###km
+km_fit <- survfit(Surv(capped_time_60, capped_OS_Status_60) ~ risk_group, data = model_df)
+
+ggsurvplot(
+  km_fit, data = model_df,
+  pval = TRUE,             
+  risk.table = TRUE,      
+  conf.int = TRUE,
+  legend.title = "Risk group",
+  legend.labs = c("Low", "High"),
+  xlab = "Months", ylab = "Overall survival probability",
+  title = "12-Probe Risk Score: High vs Low KM Curve (Split by the Median)"
+)
+
+###c index
+cindex <- concordance.index(
+  x = model_df$risk_score,
+  surv.time = model_df$capped_time_60,
+  surv.event = model_df$capped_OS_Status_60,
+  method = "noether"
+)
+print(cindex$c.index)
+print(cindex$p.value)
+
+
+roc_obj <- timeROC(
+  T = model_df$capped_time_60,
+  delta = model_df$capped_OS_Status_60,
+  marker = model_df$risk_score,
+  cause = 1,
+  times = seq(0, 60, by = 1),  # compute AUC at many time points
+  iid = TRUE
+)
+
+###AUC
+plot(roc_obj$times, roc_obj$AUC, type = "l", col = "blue", lwd = 2,
+     xlab = "Time (months)", ylab = "AUC", main = "Time-dependent AUC")
+abline(h = 0.5, lty = 2, col = "grey")  # reference line
+
+
+
+###extract and save forlater use
+coef_vec <- coef(cox12)
+coef_df <- data.frame(
+  Probe = names(coef_vec),
+  Coefficient = as.numeric(coef_vec)
+)
+write.csv(coef_df, "cox12_coefficients.csv", row.names = FALSE)
+cut_med <- median(model_df$risk_score, na.rm = TRUE)
+write.csv(data.frame(Cutpoint = cut_med), "cox12_cutpoint.csv", row.names = FALSE)
+
+```
+# Heatmap of 12 probes:
+
+```{r}
+### get betas
+twelve_probes <- final_results$Variable
+twelve_betas <- betas[rownames(betas) %in% twelve_probes, ]
+
+## annotation (build with sample IDs as rownames)
+annotation_col <- data.frame(
+  Risk_Group = model_df$risk_group,
+  Molecular_Subtype = cox_data_filtered$Molecular_Subtype,
+  Cluster = cox_data_filtered$Cluster,
+  row.names = model_df$id   # assumes model_df has samples as rownames
+)
+
+### make sure annotation matches betas columns
+common_samples <- intersect(colnames(twelve_betas), rownames(annotation_col))
+twelve_betas <- twelve_betas[, common_samples]
+annotation_col <- annotation_col[common_samples, , drop = FALSE]
+
+### ensure HIGH is first level so it always gets red
+annotation_col$Risk_Group <- factor(annotation_col$Risk_Group,
+                                    levels = c("High", "Low"))
+
+### helper for colors
+get_named_colors <- function(factor_vector, palette = "Set1") {
+  lvls <- levels(as.factor(factor_vector))
+  n_colors <- max(length(lvls), 3)  # brewer.pal minimum is 3
+  colors <- brewer.pal(n_colors, palette)[1:length(lvls)]
+  setNames(colors, lvls)
+}
+
+### define colors
+annotation_colors <- list(
+  Cluster = get_named_colors(annotation_col$Cluster),
+  Molecular_Subtype = get_named_colors(annotation_col$Molecular_Subtype),
+  Risk_Group = get_named_colors(annotation_col$Risk_Group)
+)
+
+### plot the heatmap
+pheatmap(
+  twelve_betas,
+  annotation_col = annotation_col,
+  show_rownames = TRUE,
+  show_colnames = FALSE,
+  clustering_method = "ward.D2",
+  main = "Heatmap: Prognostic DMPs",
+  color = colorRampPalette(c("green", "black", "red"))(100),
+  annotation_colors = annotation_colors,
+  border_color = NA,
+  legend = TRUE,
+  legend_labels = NA 
+)
+
+```
+
